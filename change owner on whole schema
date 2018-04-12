@@ -1,0 +1,22 @@
+declare @schema nvarchar(30) = 'Test'	-- parameter, schema for which the change has to be done
+	, @objName nvarchar(100)
+	, @sql nvarchar(1000) = 'ALTER AUTHORIZATION ON OBJECT::%s TO dbo'
+	, @sqlinst nvarchar(1000)
+declare crs cursor
+for
+select @schema + '.' + object_name(object_id) from sys.objects where schema_id = SCHEMA_id(@schema)
+
+open crs
+fetch crs into @objName
+while @@FETCH_STATUS = 0
+ begin
+	set @sqlinst = replace(@sql, '%s', @objName)
+	--print(@sqlinst)
+	exec(@sqlinst)
+	fetch crs into @objName
+ end
+close crs
+deallocate crs
+
+set @sqlinst = replace(@sql, 'OBJECT::%s', 'SCHEMA::' + @schema)
+exec(@sqlinst)
