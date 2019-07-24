@@ -54,10 +54,10 @@ while @@FETCH_STATUS = 0 and SYSDATETIME() < dateadd(hh, 1, @startTime)
  begin
 	if @fullIndexId = 0		-- heap
 		set @defragSQL = 'ALTER TABLE ' + @fullObjectName + ' REBUILD'
-
-	if @fullIndexId = 1
+	else
+	-- if @fullIndexId = 1
 	 begin
-		delete #crs where @dbname + '.' + ObjectName = @fullObjectName and index_id > 1
+		-- delete #crs where @dbname + '.' + ObjectName = @fullObjectName and index_id > 1
 		set @defragSQL = 'ALTER INDEX ' + @fullIndexName + ' ON ' + @fullObjectName
 			+ iif(@fullFrag < 30, ' REORGANIZE', ' REBUILD')
 		if @fullFrag < 30
