@@ -2,22 +2,51 @@ use master
 go
 
 create or alter proc sp_reindex
+    @minPageCount int = 100             -- eliminates tables which are too small
+    , @minFragmentationInPercent int = 10   -- sets the minimum value of AVG fragmentation in percent
+    , @dbIds NVARCHAR(1000) = NULL      -- if executed for more databases, set it as a commma separated list of DBs (i.e. '7, 8, 9')
+                                        -- if just one database should be defragmented, leave it NULL and execute the procedure within the context of the database
+    , @reindexAllUserDbs bit = 0        -- if all user databases need to be defragmented, set it to 1
 as
+set nocount on
+create table #dbs (database_id int)
+
+if @dbIds is NULL
+ begin
+    if @reindexAllUserDbs = 1
+        insert #dbs
+        select database_id
+        from sys.databases 
+        where 
+            state_desc = 'ONLINE'
+            and database_id > 4 and database_id < 32767
+    ELSE
+        insert #dbs values (DB_ID())
+ end
+ELSE
+    insert #dbs
+    select value from string_split(@dbIds, ',')
 select
 	stat.index_id
-	, stat.object_id
-	, DB_NAME() as DatabaseName
-	, stat.avg_fragmentation_in_percent
+    , stat.object_id
+    , QUOTENAME(DB_NAME(stat.database_id)) as DatabaseName
+	, CONCAT(
+        QUOTENAME(DB_NAME(stat.database_id)), '.'
+        , QUOTENAME(OBJECT_SCHEMA_NAME(stat.object_id, stat.database_id)), '.'
+	    , QUOTENAME(OBJECT_NAME(stat.object_id, stat.database_id))) as FullObjectName
+    , stat.avg_fragmentation_in_percent
 into #stat
-from sys.dm_db_index_physical_stats(db_id(), null, null, null, null) as stat
+from #dbs 
+    cross apply sys.dm_db_index_physical_stats(database_id, null, null, null, null) as stat
 where 1 = 1
-	and stat.avg_fragmentation_in_percent >= 20 
-	and stat.page_count >= 100
+	and stat.avg_fragmentation_in_percent >= @minFragmentationInPercent
+	and stat.page_count >= @minPageCount
 	and stat.alloc_unit_type_desc = 'IN_ROW_DATA'
 
 create table #crs
 (
-ObjectName nvarchar(256)
+DbName nvarchar(255)
+, FullObjectName nvarchar(256)
 , IndexName nvarchar(500)
 , index_id int
 , avg_fragmentation_in_percent dec(6, 3)
@@ -25,18 +54,31 @@ ObjectName nvarchar(256)
 declare @sql nvarchar(max) = 
 'insert #crs
 select distinct
-	s.name + ''.'' + o.name as ObjectName
-	, i.name as IndexName
-	, i.index_id
+	stat.DatabaseName
+    , stat.FullObjectName
+    , i.name as IndexName
+    , stat.index_id
 	, stat.avg_fragmentation_in_percent
 from #stat as stat
-	join $db$.sys.objects as o on o.object_id = stat.object_id
-	join $db$.sys.schemas as s on s.schema_id = o.schema_id
-	left join $db$.sys.indexes as i on i.object_id = o.object_id and i.index_id = stat.index_id
-order by ObjectName, i.index_id'
-declare @dbname nvarchar(128) = (select top(1) DatabaseName from #stat)
-set @sql = replace(@sql, '$db$', @dbname)
-exec(@sql)
+	left join $db$.sys.indexes as i on i.object_id = stat.object_id and i.index_id = stat.index_id
+where stat.DatabaseName = ''$db$''
+order by FullObjectName, stat.index_id'
+    , @dbname nvarchar(128)
+    , @sqlDef nvarchar(max)
+
+declare crsDb cursor 
+for
+select distinct DatabaseName from #stat
+open crsDb
+fetch crsDb into @dbName
+while @@FETCH_STATUS = 0
+ BEGIN
+    set @sqlDef = replace(@sql, '$db$', @dbname)
+    exec(@sqlDef)
+    fetch crsDb into @dbName
+ END
+CLOSE crsDb
+DEALLOCATE crsDb
 
 declare @fullObjectName nvarchar(500)
 	, @fullIndexName nvarchar(500)
@@ -47,7 +89,7 @@ declare @fullObjectName nvarchar(500)
 
 declare crs cursor local
 for
-select @dbname + '.' + ObjectName, IndexName, index_id, avg_fragmentation_in_percent from #crs
+select FullObjectName, IndexName, index_id, avg_fragmentation_in_percent from #crs
 open crs
 fetch crs into @fullObjectName, @fullIndexName, @fullIndexId, @fullFrag
 while @@FETCH_STATUS = 0 and SYSDATETIME() < dateadd(hh, 1, @startTime)
@@ -55,15 +97,14 @@ while @@FETCH_STATUS = 0 and SYSDATETIME() < dateadd(hh, 1, @startTime)
 	if @fullIndexId = 0		-- heap
 		set @defragSQL = 'ALTER TABLE ' + @fullObjectName + ' REBUILD'
 	else
-	-- if @fullIndexId = 1
 	 begin
-		-- delete #crs where @dbname + '.' + ObjectName = @fullObjectName and index_id > 1
 		set @defragSQL = 'ALTER INDEX ' + @fullIndexName + ' ON ' + @fullObjectName
 			+ iif(@fullFrag < 30, ' REORGANIZE', ' REBUILD')
 		if @fullFrag < 30
 			set @defragSQL += ' UPDATE STATISTICS ' + @fullObjectName 
 	 end
 
+    -- print @defragSQL
 	exec(@defragSQL)
 	fetch crs into @fullObjectName, @fullIndexName, @fullIndexId, @fullFrag
  end
