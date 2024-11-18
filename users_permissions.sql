@@ -1,14 +1,32 @@
+/*DB PERMISSIONS*/
+-- parametr s nazvem db user accountu
+declare @userName nvarchar(100) = '<add user name here>'
+
+-- uzivatel a jeho clenstvi ve vsech DB rolich
+-- -- Pozn.: pro fixed db roles nejsou videt permissions, protoze nejsou nikde explicitne vypsane
+;with db_principal as
+(
+    select principal_id, name, type_desc from sys.database_principals where name = @userName
+    union ALL
+    select drm.role_principal_id, dp.name, dp.type_desc 
+    from sys.database_role_members as drm
+        join db_principal on drm.member_principal_id = db_principal.principal_id
+        join sys.database_principals as dp on dp.principal_id = drm.role_principal_id
+)
 select
-	--dp.name as user_name
-	p.class_desc
-	, p.permission_name
-	, s.name as schema_name
-	, concat(OBJECT_SCHEMA_NAME(o.object_id), '.', o.name) as full_object_name
-	--, p.*
-from sys.database_principals as dp
-	join sys.database_permissions as p on dp.principal_id = p.grantee_principal_id
-	left join sys.schemas as s on p.major_id = s.schema_id and p.class_desc = 'SCHEMA'
-	left join sys.all_objects as o on p.major_id = o.object_id and p.class_desc = 'OBJECT_OR_COLUMN'
-where dp.name = 'WocoDwhTest'
-	and p.state_desc = 'GRANT'
-	and p.class_desc != 'DATABASE'
+    db_principal.name as principal_name
+    , db_principal.type_desc
+    , class_desc
+    -- , major_id
+    -- , minor_id
+    , case class_desc
+        when 'OBJECT_OR_COLUMN' then 
+                CONCAT(OBJECT_SCHEMA_NAME(major_id), '.', OBJECT_NAME(major_id), (select '.' + name from sys.all_columns where object_id = major_id and column_id = minor_id))
+        when 'SCHEMA' then SCHEMA_NAME(major_id)
+        when 'DATABASE' then DB_NAME()
+        else NULL
+      end as entity_name
+    , permission_name
+    , state_desc
+from db_principal
+    left join sys.database_permissions as dp on db_principal.principal_id = dp.grantee_principal_id
